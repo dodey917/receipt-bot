@@ -9,6 +9,8 @@ logger = logging.getLogger(__name__)
 
 class OCRProcessor:
     def __init__(self):
+        if not Config.OPENAI_API_KEY:
+            raise ValueError("OpenAI API key not configured")
         self.client = OpenAI(api_key=Config.OPENAI_API_KEY)
     
     def encode_image(self, image_path):
@@ -23,24 +25,24 @@ class OCRProcessor:
             base64_image = self.encode_image(image_path)
             
             # System prompt for structured extraction
-            system_prompt = """
-            You are an expert financial document processor. Extract the following fields from the receipt image:
-            
-            REQUIRED FIELDS:
-            - sender_name: Full name of the sender/money sender
-            - receiver_name: Full name of the receiver/beneficiary  
-            - account_number: Receiver's account number, IBAN, or unique transfer identifier
-            - amount: Total monetary value of the transaction (as float)
-            - date_sent: Transaction date in YYYY-MM-DD format
-            
-            IMPORTANT INSTRUCTIONS:
-            1. Extract ONLY the specified fields
-            2. Return data as valid JSON
-            3. If a field is not found, use "Unknown" for strings or 0.0 for amount
-            4. Convert dates to YYYY-MM-DD format
-            5. Remove currency symbols from amount, keep only numeric value
-            6. Be precise with names and account numbers
-            """
+            system_prompt = """You are an expert financial document processor. Extract transaction details from receipt images and return ONLY valid JSON.
+
+IMPORTANT: Return ONLY JSON, no other text.
+
+Required JSON structure:
+{
+    "sender_name": "Full name of sender",
+    "receiver_name": "Full name of receiver", 
+    "account_number": "Account number or transfer ID",
+    "amount": 123.45,
+    "date_sent": "YYYY-MM-DD"
+}
+
+Guidelines:
+- If a field is not found, use "Unknown" for strings or 0.0 for amount
+- Convert all dates to YYYY-MM-DD format
+- Remove currency symbols, keep only numeric amount
+- Be precise with names and account numbers"""
             
             response = self.client.chat.completions.create(
                 model="gpt-4-vision-preview",
@@ -54,7 +56,7 @@ class OCRProcessor:
                         "content": [
                             {
                                 "type": "text", 
-                                "text": "Extract the transaction data from this receipt. Return ONLY valid JSON:"
+                                "text": "Extract transaction data from this receipt image and return ONLY valid JSON:"
                             },
                             {
                                 "type": "image_url",
@@ -66,11 +68,11 @@ class OCRProcessor:
                     }
                 ],
                 max_tokens=500,
-                temperature=0.1  # Low temperature for consistent formatting
+                temperature=0.0  # Zero temperature for consistent output
             )
             
             # Extract JSON from response
-            raw_content = response.choices[0].message.content
+            raw_content = response.choices[0].message.content.strip()
             logger.info(f"Raw API response: {raw_content}")
             
             # Clean response and extract JSON
@@ -113,7 +115,7 @@ class OCRProcessor:
                 # Validate it's proper JSON
                 json.loads(json_str)
                 return json_str
-        except:
-            pass
+        except json.JSONDecodeError:
+            logger.warning(f"Failed to parse JSON from: {text}")
         
         return None
