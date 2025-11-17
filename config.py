@@ -1,5 +1,6 @@
 import os
 from dotenv import load_dotenv
+import json
 
 load_dotenv()
 
@@ -14,16 +15,9 @@ class Config:
     GOOGLE_SHEETS_CREDENTIALS = os.getenv('GOOGLE_SHEETS_CREDENTIALS')
     SPREADSHEET_ID = os.getenv('SPREADSHEET_ID')
     
-    # Extraction Schema
-    EXTRACTION_SCHEMA = {
-        "type": "object",
-        "properties": {
-            "sender_name": {"type": "string"},
-            "receiver_name": {"type": "string"},
-            "account_number": {"type": "string"},
-            "amount": {"type": "number"},
-            "date_sent": {"type": "string", "format": "date"}
-        },
-        "required": ["sender_name", "receiver_name", "account_number", "amount", "date_sent"],
-        "additionalProperties": False
-    }
+    @classmethod
+    def get_google_credentials(cls):
+        """Parse Google Sheets credentials from environment variable"""
+        if cls.GOOGLE_SHEETS_CREDENTIALS:
+            return json.loads(cls.GOOGLE_SHEETS_CREDENTIALS)
+        return None
