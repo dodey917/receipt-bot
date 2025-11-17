@@ -22,7 +22,7 @@ class Config:
             try:
                 return json.loads(cls.GOOGLE_SHEETS_CREDENTIALS)
             except json.JSONDecodeError as e:
-                print(f"Error parsing Google credentials: {e}")
+                print(f"❌ Error parsing Google credentials: {e}")
                 return None
         return None
     
@@ -41,3 +41,5 @@ class Config:
         
         if errors:
             raise ValueError("Configuration errors: " + "; ".join(errors))
+        else:
+            print("✅ All configuration validated successfully")
