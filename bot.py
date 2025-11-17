@@ -30,16 +30,16 @@ class ReceiptBot:
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Send welcome message when command /start is issued."""
         welcome_text = """
-🤖 **Advanced Receipt Processing Bot**
+🤖 Advanced Receipt Processing Bot
 
 I can extract structured data from your receipt images!
 
-**Supported Documents:**
+Supported Documents:
 • Bank transfer receipts
 • Money transfer slips  
 • Payment confirmations
 
-**How to use:**
+How to use:
 1. Send me a clear image of your receipt
 2. I'll extract: sender, receiver, account number, amount, and date
 3. Data will be saved to our database
@@ -55,7 +55,7 @@ Send me a receipt image to get started!
         
         # Send processing message
         processing_msg = await update.message.reply_text(
-            "🔄 Processing your receipt... This may take 10-20 seconds."
+            "Processing your receipt... This may take 10-20 seconds."
         )
         
         temp_file_path = None
@@ -76,7 +76,7 @@ Send me a receipt image to get started!
             )
             
             if not extraction_result.success:
-                error_text = f"❌ Extraction failed: {extraction_result.error}"
+                error_text = f"Extraction failed: {extraction_result.error}"
                 if "rate limit" in extraction_result.error.lower():
                     error_text += "\nPlease try again in a minute."
                 await processing_msg.edit_text(error_text)
@@ -87,18 +87,18 @@ Send me a receipt image to get started!
             
             if not save_success:
                 await processing_msg.edit_text(
-                    "✅ Data extracted but failed to save to database. Please contact admin."
+                    "Data extracted but failed to save to database. Please contact admin."
                 )
                 return
             
             # Send success message with extracted data
             success_text = self._format_success_message(extraction_result.data)
-            await processing_msg.edit_text(success_text, parse_mode='Markdown')
+            await processing_msg.edit_text(success_text)
             
         except Exception as e:
             logger.error(f"Error processing image: {str(e)}")
             await processing_msg.edit_text(
-                "❌ An error occurred while processing your image. Please try again with a clearer image."
+                "An error occurred while processing your image. Please try again with a clearer image."
             )
         finally:
             # Clean up temp file
@@ -111,18 +111,16 @@ Send me a receipt image to get started!
     def _format_success_message(self, data):
         """Format extracted data into a nice message"""
         return f"""
-✅ **Receipt Processed Successfully!**
+Receipt Processed Successfully!
 
-📋 **Extracted Data:**
-┌──────────────────────────────
-│ 👤 **Sender:** {data.sender_name}
-│ 👤 **Receiver:** {data.receiver_name}  
-│ 🔢 **Account:** {data.account_number}
-│ 💰 **Amount:** ${data.amount:,.2f}
-│ 📅 **Date:** {data.date_sent}
-└──────────────────────────────
+Extracted Data:
+Sender: {data.sender_name}
+Receiver: {data.receiver_name}
+Account: {data.account_number}
+Amount: ${data.amount:,.2f}
+Date: {data.date_sent}
 
-💾 Data has been saved to the database.
+Data has been saved to the database.
         """
     
     async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -148,7 +146,7 @@ def main():
         
         # Start bot
         logger.info("Bot is starting...")
-        print("🤖 Bot is running on Render...")
+        print("Bot is running on Render...")
         
         # Run the bot
         application.run_polling(
@@ -158,7 +156,7 @@ def main():
         
     except Exception as e:
         logger.error(f"Failed to start bot: {str(e)}")
-        print(f"❌ Bot failed to start: {e}")
+        print(f"Bot failed to start: {e}")
 
 if __name__ == '__main__':
     main()
