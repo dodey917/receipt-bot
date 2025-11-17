@@ -21,7 +21,8 @@ class Config:
         if cls.GOOGLE_SHEETS_CREDENTIALS:
             try:
                 return json.loads(cls.GOOGLE_SHEETS_CREDENTIALS)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
+                print(f"Error parsing Google credentials: {e}")
                 return None
         return None
     
