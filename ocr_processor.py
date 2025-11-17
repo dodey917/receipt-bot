@@ -13,16 +13,14 @@ class OCRProcessor:
             raise ValueError("OpenAI API key not configured")
         self.client = OpenAI(api_key=Config.OPENAI_API_KEY)
     
-    def encode_image(self, image_path):
-        """Encode image to base64"""
-        with open(image_path, "rb") as image_file:
-            return base64.b64encode(image_file.read()).decode('utf-8')
-    
     def extract_data(self, image_path):
         """Extract structured data from receipt image using GPT-4 Vision"""
         try:
-            # Encode image
-            base64_image = self.encode_image(image_path)
+            # Read image file directly as binary
+            with open(image_path, "rb") as image_file:
+                image_data = image_file.read()
+            
+            base64_image = base64.b64encode(image_data).decode('utf-8')
             
             # System prompt for structured extraction
             system_prompt = """You are an expert financial document processor. Extract transaction details from receipt images and return ONLY valid JSON.
@@ -42,7 +40,8 @@ Guidelines:
 - If a field is not found, use "Unknown" for strings or 0.0 for amount
 - Convert all dates to YYYY-MM-DD format
 - Remove currency symbols, keep only numeric amount
-- Be precise with names and account numbers"""
+- Be precise with names and account numbers
+- Return ONLY the JSON object, no other text"""
             
             response = self.client.chat.completions.create(
                 model="gpt-4-vision-preview",
@@ -68,7 +67,7 @@ Guidelines:
                     }
                 ],
                 max_tokens=500,
-                temperature=0.0  # Zero temperature for consistent output
+                temperature=0.0
             )
             
             # Extract JSON from response
