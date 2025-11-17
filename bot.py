@@ -1,14 +1,17 @@
 import logging
 import sys
 import os
-from telegram import Update
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 import tempfile
-import threading
+import asyncio
 import base64
 import json
 from datetime import datetime
-import openai
+from typing import Optional
+
+# Import modern versions
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from openai import OpenAI
 import gspread
 from google.oauth2.service_account import Credentials
 from dotenv import load_dotenv
@@ -84,7 +87,7 @@ class OCRProcessor:
     def __init__(self):
         if not Config.OPENAI_API_KEY:
             raise ValueError("OpenAI API key not configured")
-        openai.api_key = Config.OPENAI_API_KEY
+        self.client = OpenAI(api_key=Config.OPENAI_API_KEY)
     
     def extract_data(self, image_path):
         """Extract structured data from receipt image using GPT-4 Vision"""
@@ -97,7 +100,7 @@ class OCRProcessor:
             
             base64_image = base64.b64encode(image_data).decode('utf-8')
             
-            response = openai.ChatCompletion.create(
+            response = self.client.chat.completions.create(
                 model="gpt-4-vision-preview",
                 messages=[
                     {
@@ -221,7 +224,7 @@ class ReceiptBot:
             logger.error(f"❌ Failed to initialize ReceiptBot: {str(e)}")
             raise
     
-    def start(self, update: Update, context: CallbackContext):
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Send welcome message when command /start is issued."""
         logger.info(f"Start command received from user {update.message.from_user.id}")
         welcome_text = """
@@ -241,84 +244,62 @@ How to use:
 
 Send me a receipt image to get started!
         """
-        update.message.reply_text(welcome_text)
+        await update.message.reply_text(welcome_text)
         logger.info("✅ Start message sent successfully")
     
-    def handle_image(self, update: Update, context: CallbackContext):
+    async def handle_image(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle incoming receipt images"""
         user = update.message.from_user
         logger.info(f"📸 Image received from user {user.id}")
         
         # Send processing message
-        processing_msg = update.message.reply_text(
+        processing_msg = await update.message.reply_text(
             "🔄 Processing your receipt... This may take 10-20 seconds."
         )
         
-        # Process image in a separate thread to avoid blocking
-        thread = threading.Thread(
-            target=self._process_image_thread,
-            args=(update, context, processing_msg)
-        )
-        thread.start()
-    
-    def _process_image_thread(self, update: Update, context: CallbackContext, processing_msg):
-        """Process image in a separate thread"""
         temp_file_path = None
         try:
             # Download image (get the highest resolution)
-            photo_file = update.message.photo[-1].get_file()
+            photo_file = await update.message.photo[-1].get_file()
             
             # Create temporary file
             with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as temp_file:
                 temp_file_path = temp_file.name
             
-            photo_file.download(temp_file_path)
+            await photo_file.download_to_drive(temp_file_path)
             logger.info(f"✅ Image downloaded to {temp_file_path}")
             
-            # Process image
-            extraction_result = self.ocr_processor.extract_data(temp_file_path)
+            # Process image (run in thread to avoid blocking)
+            extraction_result = await asyncio.get_event_loop().run_in_executor(
+                None, self.ocr_processor.extract_data, temp_file_path
+            )
             
             if not extraction_result["success"]:
                 error_text = f"❌ Extraction failed: {extraction_result['error']}"
                 if "rate limit" in extraction_result['error'].lower():
                     error_text += "\nPlease try again in a minute."
-                context.bot.edit_message_text(
-                    chat_id=processing_msg.chat_id,
-                    message_id=processing_msg.message_id,
-                    text=error_text
-                )
+                await processing_msg.edit_text(error_text)
                 return
             
             # Save to Google Sheets
             save_success = self.sheets_handler.append_transaction(extraction_result["data"])
             
             if not save_success:
-                context.bot.edit_message_text(
-                    chat_id=processing_msg.chat_id,
-                    message_id=processing_msg.message_id,
-                    text="✅ Data extracted but failed to save to database. Please contact admin."
+                await processing_msg.edit_text(
+                    "✅ Data extracted but failed to save to database. Please contact admin."
                 )
                 return
             
             # Send success message with extracted data
             success_text = self._format_success_message(extraction_result["data"])
-            context.bot.edit_message_text(
-                chat_id=processing_msg.chat_id,
-                message_id=processing_msg.message_id,
-                text=success_text
-            )
+            await processing_msg.edit_text(success_text)
             logger.info("✅ Receipt processed and saved successfully")
             
         except Exception as e:
             logger.error(f"❌ Error processing image: {str(e)}")
-            try:
-                context.bot.edit_message_text(
-                    chat_id=processing_msg.chat_id,
-                    message_id=processing_msg.message_id,
-                    text="❌ An error occurred while processing your image. Please try again with a clearer image."
-                )
-            except Exception as edit_error:
-                logger.error(f"Failed to edit message: {edit_error}")
+            await processing_msg.edit_text(
+                "❌ An error occurred while processing your image. Please try again with a clearer image."
+            )
         finally:
             # Clean up temp file
             if temp_file_path and os.path.exists(temp_file_path):
@@ -345,11 +326,11 @@ Send me a receipt image to get started!
 💾 Data has been saved to the database.
         """
     
-    def error_handler(self, update: Update, context: CallbackContext):
+    async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle errors"""
         logger.error(f"Update {update} caused error {context.error}")
 
-def main():
+async def main():
     """Start the bot"""
     try:
         logger.info("🚀 Starting Receipt Bot...")
@@ -361,34 +342,25 @@ def main():
         # Create bot instance
         receipt_bot = ReceiptBot()
         
-        # Create updater
-        updater = Updater(Config.TELEGRAM_BOT_TOKEN, use_context=True)
-        logger.info("✅ Updater created")
-        
-        # Get dispatcher to register handlers
-        dp = updater.dispatcher
+        # Create application
+        application = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
+        logger.info("✅ Application created")
         
         # Add handlers
-        dp.add_handler(CommandHandler("start", receipt_bot.start))
-        dp.add_handler(MessageHandler(Filters.photo, receipt_bot.handle_image))
-        dp.add_error_handler(receipt_bot.error_handler)
+        application.add_handler(CommandHandler("start", receipt_bot.start))
+        application.add_handler(MessageHandler(filters.PHOTO, receipt_bot.handle_image))
+        application.add_error_handler(receipt_bot.error_handler)
         
         # Start bot
         logger.info("✅ Starting bot polling...")
         print("🤖 Bot is starting on Render...")
         
-        # Start polling
-        updater.start_polling()
-        logger.info("✅ Bot started polling successfully")
-        print("✅ Bot is now running and listening for messages...")
-        
-        # Run the bot until you press Ctrl-C
-        updater.idle()
+        # Run the bot
+        await application.run_polling()
         
     except Exception as e:
         logger.error(f"❌ Failed to start bot: {str(e)}")
         print(f"❌ Bot failed to start: {e}")
-        sys.exit(1)
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())
