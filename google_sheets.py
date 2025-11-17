@@ -4,7 +4,6 @@ from config import Config
 from schemas import TransactionData
 import logging
 from datetime import datetime
-import json
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +13,8 @@ class GoogleSheetsHandler:
             "https://spreadsheets.google.com/feeds",
             "https://www.googleapis.com/auth/drive"
         ]
+        self.client = None
+        self.sheet = None
         self._setup_client()
     
     def _setup_client(self):
@@ -21,10 +22,7 @@ class GoogleSheetsHandler:
         try:
             creds_dict = Config.get_google_credentials()
             if not creds_dict:
-                logger.warning("Google Sheets credentials not found - running in test mode")
-                self.client = None
-                self.sheet = None
-                return
+                raise ValueError("Google Sheets credentials not found")
                 
             creds = Credentials.from_service_account_info(creds_dict, scopes=self.scope)
             self.client = gspread.authorize(creds)
@@ -32,17 +30,11 @@ class GoogleSheetsHandler:
             logger.info("Google Sheets client setup successfully")
         except Exception as e:
             logger.error(f"Google Sheets setup failed: {str(e)}")
-            # Continue without sheets for now
-            self.client = None
-            self.sheet = None
+            raise
     
     def append_transaction(self, transaction_data: TransactionData):
         """Append transaction data to Google Sheet"""
         try:
-            if not self.sheet:
-                logger.warning("Google Sheets not available - skipping save")
-                return True  # Return True to continue processing
-                
             # Prepare row data
             row = [
                 transaction_data.sender_name,
@@ -50,7 +42,7 @@ class GoogleSheetsHandler:
                 transaction_data.account_number,
                 str(transaction_data.amount),
                 transaction_data.date_sent,
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S")  # Timestamp of entry
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             ]
             
             # Append to sheet
@@ -60,4 +52,4 @@ class GoogleSheetsHandler:
             
         except Exception as e:
             logger.error(f"Failed to append to Google Sheets: {str(e)}")
-            return False  # But don't fail the whole process
+            return False
