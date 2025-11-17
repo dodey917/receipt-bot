@@ -1,6 +1,6 @@
 import base64
 import json
-from openai import OpenAI
+import openai
 from config import Config
 from schemas import TransactionData, ExtractionResponse
 import logging
@@ -11,11 +11,13 @@ class OCRProcessor:
     def __init__(self):
         if not Config.OPENAI_API_KEY:
             raise ValueError("OpenAI API key not configured")
-        self.client = OpenAI(api_key=Config.OPENAI_API_KEY)
+        openai.api_key = Config.OPENAI_API_KEY
     
     def extract_data(self, image_path):
         """Extract structured data from receipt image using GPT-4 Vision"""
         try:
+            logger.info("Starting OCR processing...")
+            
             # Read image file directly as binary
             with open(image_path, "rb") as image_file:
                 image_data = image_file.read()
@@ -43,7 +45,7 @@ Guidelines:
 - Be precise with names and account numbers
 - Return ONLY the JSON object, no other text"""
             
-            response = self.client.chat.completions.create(
+            response = openai.ChatCompletion.create(
                 model="gpt-4-vision-preview",
                 messages=[
                     {
@@ -88,6 +90,7 @@ Guidelines:
             extracted_data = json.loads(json_str)
             validated_data = TransactionData(**extracted_data)
             
+            logger.info("✅ OCR processing completed successfully")
             return ExtractionResponse(
                 success=True,
                 data=validated_data,
@@ -95,7 +98,7 @@ Guidelines:
             )
             
         except Exception as e:
-            logger.error(f"Error in data extraction: {str(e)}")
+            logger.error(f"❌ Error in data extraction: {str(e)}")
             return ExtractionResponse(
                 success=False,
                 error=str(e),
