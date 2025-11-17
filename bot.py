@@ -75,13 +75,28 @@ class TransactionData:
     
     @classmethod
     def from_dict(cls, data):
-        return cls(
-            sender_name=data.get('sender_name', 'Unknown'),
-            receiver_name=data.get('receiver_name', 'Unknown'),
-            account_number=data.get('account_number', 'Unknown'),
-            amount=float(data.get('amount', 0.0)),
-            date_sent=data.get('date_sent', 'Unknown')
-        )
+        # Simple validation
+        sender_name = data.get('sender_name', 'Unknown')
+        receiver_name = data.get('receiver_name', 'Unknown')
+        account_number = data.get('account_number', 'Unknown')
+        
+        # Validate amount
+        try:
+            amount = float(data.get('amount', 0.0))
+            if amount <= 0:
+                amount = 0.0
+        except (ValueError, TypeError):
+            amount = 0.0
+        
+        # Validate date
+        date_sent = data.get('date_sent', 'Unknown')
+        if date_sent != 'Unknown':
+            try:
+                datetime.strptime(date_sent, '%Y-%m-%d')
+            except ValueError:
+                date_sent = 'Unknown'
+        
+        return cls(sender_name, receiver_name, account_number, amount, date_sent)
 
 class OCRProcessor:
     def __init__(self):
@@ -105,7 +120,7 @@ class OCRProcessor:
                 messages=[
                     {
                         "role": "system",
-                        "content": """Extract transaction details from receipt images and return ONLY valid JSON with these fields: sender_name, receiver_name, account_number, amount, date_sent. Return ONLY JSON, no other text."""
+                        "content": """You are an expert financial document processor. Extract transaction details from receipt images and return ONLY valid JSON with these fields: sender_name, receiver_name, account_number, amount, date_sent. Return ONLY JSON, no other text."""
                     },
                     {
                         "role": "user",
