@@ -3,6 +3,8 @@ from google.oauth2.service_account import Credentials
 from config import Config
 from schemas import TransactionData
 import logging
+from datetime import datetime
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -17,10 +19,14 @@ class GoogleSheetsHandler:
     def _setup_client(self):
         """Setup Google Sheets client"""
         try:
-            creds_dict = json.loads(Config.GOOGLE_SHEETS_CREDENTIALS)
+            creds_dict = Config.get_google_credentials()
+            if not creds_dict:
+                raise ValueError("Google Sheets credentials not found")
+                
             creds = Credentials.from_service_account_info(creds_dict, scopes=self.scope)
             self.client = gspread.authorize(creds)
             self.sheet = self.client.open_by_key(Config.SPREADSHEET_ID).sheet1
+            logger.info("Google Sheets client setup successfully")
         except Exception as e:
             logger.error(f"Google Sheets setup failed: {str(e)}")
             raise
@@ -35,7 +41,7 @@ class GoogleSheetsHandler:
                 transaction_data.account_number,
                 str(transaction_data.amount),
                 transaction_data.date_sent,
-                str(datetime.now())  # Timestamp of entry
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S")  # Timestamp of entry
             ]
             
             # Append to sheet
