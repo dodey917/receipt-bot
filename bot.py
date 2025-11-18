@@ -1,381 +1,185 @@
-import logging
-import sys
 import os
-import tempfile
-import asyncio
-import base64
+import logging
+import io
 import json
-from datetime import datetime
-from typing import Optional
-
-# Import modern versions
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from openai import OpenAI
+from dotenv import load_dotenv
+
+# Import our new modules
+from ai_processor import analyze_receipt
+from schemas import ReceiptExtraction
 import gspread
 from google.oauth2.service_account import Credentials
-from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 
-# Setup logging
+# --- Configuration ---
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO,
-    stream=sys.stdout
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-class Config:
-    # Telegram Bot Token
-    TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-    
-    # OpenAI API Configuration
-    OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-    
-    # Google Sheets Configuration
-    GOOGLE_SHEETS_CREDENTIALS = os.getenv('GOOGLE_SHEETS_CREDENTIALS')
-    SPREADSHEET_ID = os.getenv('SPREADSHEET_ID')
-    
-    @classmethod
-    def get_google_credentials(cls):
-        """Parse Google Sheets credentials from environment variable"""
-        if cls.GOOGLE_SHEETS_CREDENTIALS:
-            try:
-                return json.loads(cls.GOOGLE_SHEETS_CREDENTIALS)
-            except json.JSONDecodeError as e:
-                logger.error(f"Error parsing Google credentials: {e}")
-                return None
-        return None
-    
-    @classmethod
-    def validate_config(cls):
-        """Validate required configuration"""
-        errors = []
-        if not cls.TELEGRAM_BOT_TOKEN:
-            errors.append("TELEGRAM_BOT_TOKEN is required")
-        if not cls.OPENAI_API_KEY:
-            errors.append("OPENAI_API_KEY is required")
-        if not cls.SPREADSHEET_ID:
-            errors.append("SPREADSHEET_ID is required")
-        if not cls.get_google_credentials():
-            errors.append("GOOGLE_SHEETS_CREDENTIALS is required or invalid")
-        
-        if errors:
-            raise ValueError("Configuration errors: " + "; ".join(errors))
-
-class TransactionData:
-    def __init__(self, sender_name, receiver_name, account_number, amount, date_sent):
-        self.sender_name = sender_name
-        self.receiver_name = receiver_name
-        self.account_number = account_number
-        self.amount = amount
-        self.date_sent = date_sent
-    
-    @classmethod
-    def from_dict(cls, data):
-        # Simple validation
-        sender_name = data.get('sender_name', 'Unknown')
-        receiver_name = data.get('receiver_name', 'Unknown')
-        account_number = data.get('account_number', 'Unknown')
-        
-        # Validate amount
-        try:
-            amount = float(data.get('amount', 0.0))
-            if amount <= 0:
-                amount = 0.0
-        except (ValueError, TypeError):
-            amount = 0.0
-        
-        # Validate date
-        date_sent = data.get('date_sent', 'Unknown')
-        if date_sent != 'Unknown':
-            try:
-                datetime.strptime(date_sent, '%Y-%m-%d')
-            except ValueError:
-                date_sent = 'Unknown'
-        
-        return cls(sender_name, receiver_name, account_number, amount, date_sent)
-
-class OCRProcessor:
-    def __init__(self):
-        if not Config.OPENAI_API_KEY:
-            raise ValueError("OpenAI API key not configured")
-        self.client = OpenAI(api_key=Config.OPENAI_API_KEY)
-    
-    def extract_data(self, image_path):
-        """Extract structured data from receipt image using GPT-4 Vision"""
-        try:
-            logger.info("Starting OCR processing...")
-            
-            # Read image file directly as binary
-            with open(image_path, "rb") as image_file:
-                image_data = image_file.read()
-            
-            base64_image = base64.b64encode(image_data).decode('utf-8')
-            
-            response = self.client.chat.completions.create(
-                model="gpt-4-vision-preview",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": """You are an expert financial document processor. Extract transaction details from receipt images and return ONLY valid JSON with these fields: sender_name, receiver_name, account_number, amount, date_sent. Return ONLY JSON, no other text."""
-                    },
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text", 
-                                "text": "Extract transaction data from this receipt image and return ONLY valid JSON:"
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{base64_image}"
-                                }
-                            }
-                        ]
-                    }
-                ],
-                max_tokens=500,
-                temperature=0.0
-            )
-            
-            # Extract JSON from response
-            raw_content = response.choices[0].message.content.strip()
-            logger.info(f"Raw API response: {raw_content}")
-            
-            # Clean response and extract JSON
-            json_str = self._extract_json_from_response(raw_content)
-            
-            if not json_str:
-                return {"success": False, "error": "No valid JSON found", "data": None}
-            
-            # Parse data
-            extracted_data = json.loads(json_str)
-            transaction_data = TransactionData.from_dict(extracted_data)
-            
-            logger.info("✅ OCR processing completed successfully")
-            return {"success": True, "data": transaction_data, "error": None}
-            
-        except Exception as e:
-            logger.error(f"❌ Error in data extraction: {str(e)}")
-            return {"success": False, "error": str(e), "data": None}
-    
-    def _extract_json_from_response(self, text):
-        """Extract JSON string from API response"""
-        try:
-            # Try to find JSON object in the response
-            start_idx = text.find('{')
-            end_idx = text.rfind('}') + 1
-            
-            if start_idx != -1 and end_idx != 0:
-                json_str = text[start_idx:end_idx]
-                # Validate it's proper JSON
-                json.loads(json_str)
-                return json_str
-        except json.JSONDecodeError:
-            logger.warning(f"Failed to parse JSON from: {text}")
-        
-        return None
-
 class GoogleSheetsHandler:
     def __init__(self):
-        self.scope = [
-            "https://spreadsheets.google.com/feeds",
-            "https://www.googleapis.com/auth/drive"
-        ]
+        self.scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
         self.client = None
         self.sheet = None
         self._setup_client()
     
     def _setup_client(self):
-        """Setup Google Sheets client"""
+        """Setup Google Sheets client using environment variable"""
         try:
-            creds_dict = Config.get_google_credentials()
-            if not creds_dict:
-                raise ValueError("Google Sheets credentials not found")
-                
+            # Get credentials from environment variable
+            creds_json = os.getenv("GOOGLE_SHEETS_CREDENTIALS")
+            if not creds_json:
+                raise ValueError("GOOGLE_SHEETS_CREDENTIALS environment variable is required")
+            
+            creds_dict = json.loads(creds_json)
             creds = Credentials.from_service_account_info(creds_dict, scopes=self.scope)
             self.client = gspread.authorize(creds)
-            self.sheet = self.client.open_by_key(Config.SPREADSHEET_ID).sheet1
+            
+            # Get spreadsheet ID from environment
+            spreadsheet_id = os.getenv("SPREADSHEET_ID")
+            if not spreadsheet_id:
+                raise ValueError("SPREADSHEET_ID environment variable is required")
+            
+            self.sheet = self.client.open_by_key(spreadsheet_id).sheet1
             logger.info("✅ Google Sheets client setup successfully")
+            
         except Exception as e:
-            logger.error(f"❌ Google Sheets setup failed: {str(e)}")
+            logger.error(f"❌ Google Sheets setup failed: {e}")
             raise
     
-    def append_transaction(self, transaction_data):
+    def append_transaction(self, extracted_data: ReceiptExtraction):
         """Append transaction data to Google Sheet"""
         try:
-            # Prepare row data
-            row = [
-                transaction_data.sender_name,
-                transaction_data.receiver_name,
-                transaction_data.account_number,
-                str(transaction_data.amount),
-                transaction_data.date_sent,
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            row_data = [
+                extracted_data.date_sent,
+                extracted_data.sender_name,
+                extracted_data.receiver_name,
+                extracted_data.account_number,
+                str(extracted_data.amount),
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S")  # Timestamp
             ]
             
-            # Append to sheet
-            self.sheet.append_row(row)
+            self.sheet.append_row(row_data)
             logger.info("✅ Successfully appended transaction to Google Sheets")
             return True
             
         except Exception as e:
-            logger.error(f"❌ Failed to append to Google Sheets: {str(e)}")
+            logger.error(f"❌ Failed to append to Google Sheets: {e}")
             return False
 
-class ReceiptBot:
-    def __init__(self):
-        try:
-            logger.info("Initializing ReceiptBot...")
-            Config.validate_config()
-            self.ocr_processor = OCRProcessor()
-            self.sheets_handler = GoogleSheetsHandler()
-            logger.info("✅ ReceiptBot initialized successfully")
-        except Exception as e:
-            logger.error(f"❌ Failed to initialize ReceiptBot: {str(e)}")
-            raise
-    
-    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Send welcome message when command /start is issued."""
-        logger.info(f"Start command received from user {update.message.from_user.id}")
-        welcome_text = """
-🤖 Advanced Receipt Processing Bot
+# Initialize Google Sheets handler
+sheets_handler = GoogleSheetsHandler()
 
-I can extract structured data from your receipt images!
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send welcome message when command /start is issued."""
+    welcome_text = """
+🤖 **Advanced Receipt Processing Bot**
 
-Supported Documents:
+I can extract structured data from your receipt images using AI!
+
+**Supported Documents:**
 • Bank transfer receipts
 • Money transfer slips  
 • Payment confirmations
 
-How to use:
+**How to use:**
 1. Send me a clear image of your receipt
 2. I'll extract: sender, receiver, account number, amount, and date
 3. Data will be saved to our database
 
 Send me a receipt image to get started!
-        """
-        await update.message.reply_text(welcome_text)
-        logger.info("✅ Start message sent successfully")
+    """
+    await update.message.reply_text(welcome_text)
+
+async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle incoming receipt images"""
+    user = update.message.from_user
+    logger.info(f"📸 Image received from user {user.id}")
     
-    async def handle_image(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle incoming receipt images"""
-        user = update.message.from_user
-        logger.info(f"📸 Image received from user {user.id}")
+    # Send processing message
+    processing_msg = await update.message.reply_text("🔍 Scanning receipt with AI... Please wait.")
+
+    try:
+        # 1. Download the photo (Highest resolution)
+        photo_file = await update.message.photo[-1].get_file()
         
-        # Send processing message
-        processing_msg = await update.message.reply_text(
-            "🔄 Processing your receipt... This may take 10-20 seconds."
+        # Download to memory (BytesIO) instead of saving to disk
+        image_stream = io.BytesIO()
+        await photo_file.download_to_memory(out=image_stream)
+        image_bytes = image_stream.getvalue()
+
+        # 2. Send to GPT-4o
+        extracted_data = analyze_receipt(image_bytes)
+
+        if not extracted_data:
+            await processing_msg.edit_text("❌ Could not process image. Please try again with a clearer image.")
+            return
+
+        # 3. Save to Google Sheet
+        save_success = sheets_handler.append_transaction(extracted_data)
+        
+        if not save_success:
+            await processing_msg.edit_text("✅ Data extracted but failed to save to database. Please contact admin.")
+            return
+
+        # 4. Reply to User with formatted text
+        response_msg = (
+            f"✅ **Receipt Processed Successfully!**\n\n"
+            f"📅 **Date:** {extracted_data.date_sent}\n"
+            f"👤 **Sender:** {extracted_data.sender_name}\n"
+            f"📥 **Receiver:** {extracted_data.receiver_name}\n"
+            f"🔢 **Account:** {extracted_data.account_number}\n"
+            f"💰 **Amount:** ${extracted_data.amount:,.2f}\n\n"
+            f"💾 **Data saved to database**"
         )
         
-        temp_file_path = None
-        try:
-            # Download image (get the highest resolution)
-            photo_file = await update.message.photo[-1].get_file()
-            
-            # Create temporary file
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as temp_file:
-                temp_file_path = temp_file.name
-            
-            await photo_file.download_to_drive(temp_file_path)
-            logger.info(f"✅ Image downloaded to {temp_file_path}")
-            
-            # Process image (run in thread to avoid blocking)
-            extraction_result = await asyncio.get_event_loop().run_in_executor(
-                None, self.ocr_processor.extract_data, temp_file_path
-            )
-            
-            if not extraction_result["success"]:
-                error_text = f"❌ Extraction failed: {extraction_result['error']}"
-                if "rate limit" in extraction_result['error'].lower():
-                    error_text += "\nPlease try again in a minute."
-                await processing_msg.edit_text(error_text)
-                return
-            
-            # Save to Google Sheets
-            save_success = self.sheets_handler.append_transaction(extraction_result["data"])
-            
-            if not save_success:
-                await processing_msg.edit_text(
-                    "✅ Data extracted but failed to save to database. Please contact admin."
-                )
-                return
-            
-            # Send success message with extracted data
-            success_text = self._format_success_message(extraction_result["data"])
-            await processing_msg.edit_text(success_text)
-            logger.info("✅ Receipt processed and saved successfully")
-            
-        except Exception as e:
-            logger.error(f"❌ Error processing image: {str(e)}")
-            await processing_msg.edit_text(
-                "❌ An error occurred while processing your image. Please try again with a clearer image."
-            )
-        finally:
-            # Clean up temp file
-            if temp_file_path and os.path.exists(temp_file_path):
-                try:
-                    os.unlink(temp_file_path)
-                    logger.info("✅ Temporary file cleaned up")
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to delete temp file: {e}")
-    
-    def _format_success_message(self, data):
-        """Format extracted data into a nice message"""
-        return f"""
-✅ Receipt Processed Successfully!
+        await processing_msg.edit_text(response_msg, parse_mode='Markdown')
+        logger.info(f"✅ Receipt processed for user {user.id}")
 
-📋 Extracted Data:
-┌──────────────────────────────
-│ 👤 Sender: {data.sender_name}
-│ 👤 Receiver: {data.receiver_name}  
-│ 🔢 Account: {data.account_number}
-│ 💰 Amount: ${data.amount:,.2f}
-│ 📅 Date: {data.date_sent}
-└──────────────────────────────
+    except Exception as e:
+        logger.error(f"❌ Error processing image: {e}")
+        await processing_msg.edit_text("⚠️ An error occurred while processing the receipt. Please try again.")
 
-💾 Data has been saved to the database.
-        """
-    
-    async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle errors"""
-        logger.error(f"Update {update} caused error {context.error}")
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle errors in telegram bot."""
+    logger.error(f"Update {update} caused error {context.error}")
 
-async def main():
+def main():
     """Start the bot"""
+    # Load token from Environment Variable
+    TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+    
+    if not TOKEN:
+        logger.error("❌ TELEGRAM_BOT_TOKEN environment variable is required")
+        return
+        
+    if not OPENAI_API_KEY:
+        logger.error("❌ OPENAI_API_KEY environment variable is required")
+        return
+
     try:
-        logger.info("🚀 Starting Receipt Bot...")
-        
-        # Validate configuration first
-        Config.validate_config()
-        logger.info("✅ Configuration validated")
-        
-        # Create bot instance
-        receipt_bot = ReceiptBot()
-        
-        # Create application
-        application = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
-        logger.info("✅ Application created")
+        application = Application.builder().token(TOKEN).build()
         
         # Add handlers
-        application.add_handler(CommandHandler("start", receipt_bot.start))
-        application.add_handler(MessageHandler(filters.PHOTO, receipt_bot.handle_image))
-        application.add_error_handler(receipt_bot.error_handler)
+        application.add_handler(CommandHandler("start", start_command))
+        application.add_handler(MessageHandler(filters.PHOTO, handle_image))
+        application.add_error_handler(error_handler)
         
-        # Start bot
-        logger.info("✅ Starting bot polling...")
-        print("🤖 Bot is starting on Render...")
+        logger.info("🤖 Bot is starting...")
+        print("✅ Bot is running on Render...")
         
-        # Run the bot
-        await application.run_polling()
+        # Start polling
+        application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
         
     except Exception as e:
-        logger.error(f"❌ Failed to start bot: {str(e)}")
-        print(f"❌ Bot failed to start: {e}")
+        logger.error(f"❌ Failed to start bot: {e}")
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    main()
