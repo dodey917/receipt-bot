@@ -1,185 +1,118 @@
+import base64
 import os
-import logging
-import io
 import json
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from dotenv import load_dotenv
+from openai import OpenAI
+from pydantic import ValidationError
 
-# Import our new modules
-from ai_processor import analyze_receipt
-from schemas import ReceiptExtraction
-import gspread
-from google.oauth2.service_account import Credentials
+# Import schemas
+from schemas import ReceiptExtraction, QuerySchema
 
-# Load environment variables
-load_dotenv()
+# Initialize OpenAI Client (It will automatically look for OPENAI_API_KEY environment variable)
+client = OpenAI()
 
-# --- Configuration ---
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+# Define the columns available in your Google Sheet for the AI to choose from
+# Note: These must match the headers/order you use when querying the sheet.
+SHEET_COLUMNS = [
+    "Date_Sent", 
+    "Sender_Name", 
+    "Receiver_Name", 
+    "Account_Number", 
+    "Amount", 
+    "Timestamp"
+]
 
-class GoogleSheetsHandler:
-    def __init__(self):
-        self.scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        self.client = None
-        self.sheet = None
-        self._setup_client()
-    
-    def _setup_client(self):
-        """Setup Google Sheets client using environment variable"""
-        try:
-            # Get credentials from environment variable
-            creds_json = os.getenv("GOOGLE_SHEETS_CREDENTIALS")
-            if not creds_json:
-                raise ValueError("GOOGLE_SHEETS_CREDENTIALS environment variable is required")
-            
-            creds_dict = json.loads(creds_json)
-            creds = Credentials.from_service_account_info(creds_dict, scopes=self.scope)
-            self.client = gspread.authorize(creds)
-            
-            # Get spreadsheet ID from environment
-            spreadsheet_id = os.getenv("SPREADSHEET_ID")
-            if not spreadsheet_id:
-                raise ValueError("SPREADSHEET_ID environment variable is required")
-            
-            self.sheet = self.client.open_by_key(spreadsheet_id).sheet1
-            logger.info("✅ Google Sheets client setup successfully")
-            
-        except Exception as e:
-            logger.error(f"❌ Google Sheets setup failed: {e}")
-            raise
-    
-    def append_transaction(self, extracted_data: ReceiptExtraction):
-        """Append transaction data to Google Sheet"""
-        try:
-            row_data = [
-                extracted_data.date_sent,
-                extracted_data.sender_name,
-                extracted_data.receiver_name,
-                extracted_data.account_number,
-                str(extracted_data.amount),
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S")  # Timestamp
-            ]
-            
-            self.sheet.append_row(row_data)
-            logger.info("✅ Successfully appended transaction to Google Sheets")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to append to Google Sheets: {e}")
-            return False
-
-# Initialize Google Sheets handler
-sheets_handler = GoogleSheetsHandler()
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send welcome message when command /start is issued."""
-    welcome_text = """
-🤖 **Advanced Receipt Processing Bot**
-
-I can extract structured data from your receipt images using AI!
-
-**Supported Documents:**
-• Bank transfer receipts
-• Money transfer slips  
-• Payment confirmations
-
-**How to use:**
-1. Send me a clear image of your receipt
-2. I'll extract: sender, receiver, account number, amount, and date
-3. Data will be saved to our database
-
-Send me a receipt image to get started!
+def analyze_receipt(image_bytes: bytes) -> Optional[ReceiptExtraction]:
     """
-    await update.message.reply_text(welcome_text)
-
-async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming receipt images"""
-    user = update.message.from_user
-    logger.info(f"📸 Image received from user {user.id}")
-    
-    # Send processing message
-    processing_msg = await update.message.reply_text("🔍 Scanning receipt with AI... Please wait.")
-
+    Uses GPT-4o with function calling (Pydantic) to extract structured data from a receipt image.
+    """
     try:
-        # 1. Download the photo (Highest resolution)
-        photo_file = await update.message.photo[-1].get_file()
+        # Encode image to base64
+        base64_image = base64.b64encode(image_bytes).decode('utf-8')
         
-        # Download to memory (BytesIO) instead of saving to disk
-        image_stream = io.BytesIO()
-        await photo_file.download_to_memory(out=image_stream)
-        image_bytes = image_stream.getvalue()
-
-        # 2. Send to GPT-4o
-        extracted_data = analyze_receipt(image_bytes)
-
-        if not extracted_data:
-            await processing_msg.edit_text("❌ Could not process image. Please try again with a clearer image.")
-            return
-
-        # 3. Save to Google Sheet
-        save_success = sheets_handler.append_transaction(extracted_data)
+        # Define the tool (function) the model can use
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "extract_receipt_data",
+                "description": "Extracts structured financial transaction data from a bank receipt image.",
+                "parameters": ReceiptExtraction.model_json_schema()
+            }
+        }]
         
-        if not save_success:
-            await processing_msg.edit_text("✅ Data extracted but failed to save to database. Please contact admin.")
-            return
+        # Call the OpenAI API
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are an expert receipt data extractor. Analyze the image and extract the requested fields. The transaction date should be in YYYY-MM-DD format. The amount must be a number."},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Extract all transaction details from this image."},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                    ]
+                }
+            ],
+            tools=tools,
+            tool_choice={"type": "function", "function": {"name": "extract_receipt_data"}}
+        )
 
-        # 4. Reply to User with formatted text
-        response_msg = (
-            f"✅ **Receipt Processed Successfully!**\n\n"
-            f"📅 **Date:** {extracted_data.date_sent}\n"
-            f"👤 **Sender:** {extracted_data.sender_name}\n"
-            f"📥 **Receiver:** {extracted_data.receiver_name}\n"
-            f"🔢 **Account:** {extracted_data.account_number}\n"
-            f"💰 **Amount:** ${extracted_data.amount:,.2f}\n\n"
-            f"💾 **Data saved to database**"
+        # Check for function call in the response
+        message = response.choices[0].message
+        if not message.tool_calls:
+            print("AI did not call the extraction function.")
+            return None
+
+        # Process the function call argument
+        func_call = message.tool_calls[0].function
+        if func_call.name == "extract_receipt_data":
+            args = json.loads(func_call.arguments)
+            return ReceiptExtraction(**args)
+
+    except Exception as e:
+        print(f"Error during receipt analysis: {e}")
+        return None
+        
+def generate_sheet_query(user_prompt: str) -> Optional[QuerySchema]:
+    """
+    (NEW FUNCTION) Uses GPT-4o with function calling to convert a user's natural
+    language request into a structured query for the Google Sheet.
+    """
+    try:
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "create_search_query",
+                "description": f"Converts a user's request into a structured query for the database. Available columns for searching are: {', '.join(SHEET_COLUMNS)}.",
+                "parameters": QuerySchema.model_json_schema()
+            }
+        }]
+        
+        response = client.chat.completions.create(
+            model="gpt-4o-mini", # Using a smaller, faster model for this simple task
+            messages=[
+                {"role": "system", "content": f"Analyze the user's request and formulate a precise search query based on the available columns: {', '.join(SHEET_COLUMNS)}. The search value should be the exact value the user is looking for. The column name must be one of the available columns."},
+                {"role": "user", "content": user_prompt}
+            ],
+            tools=tools,
+            tool_choice={"type": "function", "function": {"name": "create_search_query"}}
         )
         
-        await processing_msg.edit_text(response_msg, parse_mode='Markdown')
-        logger.info(f"✅ Receipt processed for user {user.id}")
+        message = response.choices[0].message
+        if not message.tool_calls:
+            # Fallback if AI doesn't call the function
+            return None 
 
-    except Exception as e:
-        logger.error(f"❌ Error processing image: {e}")
-        await processing_msg.edit_text("⚠️ An error occurred while processing the receipt. Please try again.")
+        func_call = message.tool_calls[0].function
+        if func_call.name == "create_search_query":
+            args = json.loads(func_call.arguments)
+            
+            # Simple validation check against our defined columns
+            if args.get('column_to_search') in [col.lower() for col in SHEET_COLUMNS]:
+                return QuerySchema(**args)
+            
+            print(f"Invalid column selected by AI: {args.get('column_to_search')}")
+            return None # Invalid query
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle errors in telegram bot."""
-    logger.error(f"Update {update} caused error {context.error}")
-
-def main():
-    """Start the bot"""
-    # Load token from Environment Variable
-    TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-    
-    if not TOKEN:
-        logger.error("❌ TELEGRAM_BOT_TOKEN environment variable is required")
-        return
-        
-    if not OPENAI_API_KEY:
-        logger.error("❌ OPENAI_API_KEY environment variable is required")
-        return
-
-    try:
-        application = Application.builder().token(TOKEN).build()
-        
-        # Add handlers
-        application.add_handler(CommandHandler("start", start_command))
-        application.add_handler(MessageHandler(filters.PHOTO, handle_image))
-        application.add_error_handler(error_handler)
-        
-        logger.info("🤖 Bot is starting...")
-        print("✅ Bot is running on Render...")
-        
-        # Start polling
-        application.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to start bot: {e}")
-
-if __name__ == '__main__':
-    main()
+    except (Exception, ValidationError) as e:
+        print(f"Error during query generation: {e}")
+        return None
